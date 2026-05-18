@@ -1,0 +1,15 @@
+{
+  "name": "dooray-calendar-mcp",
+  "version": "1.0.0",
+  "description": "Dooray Calendar API MCP Server",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "axios": "^1.6.0",
+    "zod": "^3.22.0"
+  }
+}

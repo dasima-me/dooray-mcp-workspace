@@ -1,0 +1,15 @@
+{
+  "name": "dalle-mcp",
+  "version": "1.0.0",
+  "description": "DALL-E Image Generation MCP Server",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "openai": "^4.0.0",
+    "zod": "^3.22.0"
+  }
+}

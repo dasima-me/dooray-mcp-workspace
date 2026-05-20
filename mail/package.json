@@ -11,6 +11,7 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "nodemailer": "^6.9.0",
     "imapflow": "^1.0.98",
-    "zod": "^3.22.0"
+    "zod": "^3.22.0",
+    "localtunnel": "^2.0.2"
   }
 }

@@ -5,6 +5,12 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import nodemailer from 'nodemailer';
 import { ImapFlow } from 'imapflow';
 import { z } from 'zod';
+import http from 'http';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
+import { randomUUID } from 'crypto';
+import localtunnel from 'localtunnel';
 
 const SMTP_HOST = process.env.MAIL_SMTP_HOST || 'smtp.dooray.com';
 const SMTP_PORT = parseInt(process.env.MAIL_SMTP_PORT || '465');
@@ -12,6 +18,15 @@ const IMAP_HOST = process.env.MAIL_IMAP_HOST || 'imap.dooray.com';
 const IMAP_PORT = parseInt(process.env.MAIL_IMAP_PORT || '993');
 const MAIL_USER = process.env.MAIL_USER;
 const MAIL_PASS = process.env.MAIL_PASS;
+
+const TRACKING_PORT = parseInt(process.env.TRACKING_PORT || '3456');
+const TRACKING_DB = join(homedir(), '.dooray-mail-tracking.json');
+
+// TRACKING_BASE_URL: 환경변수로 고정 URL 지정 가능, 없으면 localtunnel로 자동 생성
+let TRACKING_BASE_URL = process.env.TRACKING_BASE_URL || null;
+
+// 1x1 transparent GIF
+const PIXEL_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 
 if (!MAIL_USER || !MAIL_PASS) {
   process.stderr.write('MAIL_USER and MAIL_PASS environment variables are required\n');
@@ -28,6 +43,102 @@ function err(e) {
     isError: true,
   };
 }
+
+function loadTracking() {
+  if (!existsSync(TRACKING_DB)) return {};
+  try { return JSON.parse(readFileSync(TRACKING_DB, 'utf8')); } catch { return {}; }
+}
+
+function saveTracking(data) {
+  writeFileSync(TRACKING_DB, JSON.stringify(data, null, 2));
+}
+
+// ── Tracking HTTP server ──────────────────────────────────────────────────────
+
+const trackingServer = http.createServer((req, res) => {
+  // 픽셀 요청
+  const pixelMatch = req.url?.match(/^\/pixel\/([a-zA-Z0-9-]+)\.gif$/);
+  if (pixelMatch) {
+    const emailId = pixelMatch[1];
+    const db = loadTracking();
+    if (db[emailId] && !db[emailId].readAt) {
+      db[emailId].readAt = new Date().toISOString();
+      saveTracking(db);
+    }
+    res.writeHead(200, { 'Content-Type': 'image/gif', 'Cache-Control': 'no-cache, no-store' });
+    res.end(PIXEL_GIF);
+    return;
+  }
+
+  // 읽음 현황 페이지
+  if (req.url === '/' || req.url === '') {
+    const db = loadTracking();
+    const rows = Object.entries(db)
+      .map(([id, v]) => ({ id, ...v }))
+      .sort((a, b) => new Date(b.sentAt) - new Date(a.sentAt));
+
+    const tableRows = rows.map(r => {
+      const read = !!r.readAt;
+      const badge = read
+        ? `<span style="color:#16a34a;font-weight:600">✔ 읽음</span><br><small style="color:#6b7280">${new Date(r.readAt).toLocaleString('ko-KR')}</small>`
+        : `<span style="color:#9ca3af">— 미확인</span>`;
+      return `<tr>
+        <td>${new Date(r.sentAt).toLocaleString('ko-KR')}</td>
+        <td>${r.to}</td>
+        <td>${r.subject}</td>
+        <td>${badge}</td>
+      </tr>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="30">
+  <title>메일 읽음 현황</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; padding: 32px; background: #f9fafb; color: #111; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    p.sub { color: #6b7280; font-size: 13px; margin-bottom: 24px; }
+    table { border-collapse: collapse; width: 100%; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    th { background: #f3f4f6; padding: 10px 16px; text-align: left; font-size: 13px; color: #374151; }
+    td { padding: 10px 16px; border-top: 1px solid #e5e7eb; font-size: 14px; vertical-align: top; }
+    tr:hover td { background: #f9fafb; }
+  </style>
+</head>
+<body>
+  <h1>메일 읽음 현황</h1>
+  <p class="sub">30초마다 자동 새로고침</p>
+  <table>
+    <thead><tr><th>발송 시각</th><th>수신자</th><th>제목</th><th>읽음 여부</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="4" style="text-align:center;color:#9ca3af;padding:32px">발송 내역이 없습니다</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
+});
+
+trackingServer.listen(TRACKING_PORT, async () => {
+  process.stderr.write(`Tracking server listening on port ${TRACKING_PORT}\n`);
+  if (!TRACKING_BASE_URL) {
+    try {
+      const tunnel = await localtunnel({ port: TRACKING_PORT });
+      TRACKING_BASE_URL = tunnel.url;
+      process.stderr.write(`Tracking tunnel URL: ${TRACKING_BASE_URL}\n`);
+      tunnel.on('error', (e) => process.stderr.write(`Tunnel error: ${e.message}\n`));
+      tunnel.on('close', () => process.stderr.write('Tunnel closed\n'));
+    } catch (e) {
+      TRACKING_BASE_URL = `http://localhost:${TRACKING_PORT}`;
+      process.stderr.write(`Tunnel failed, falling back to localhost: ${e.message}\n`);
+    }
+  }
+});
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -77,6 +188,16 @@ const tools = [
     description: '메일 폴더 목록을 조회합니다.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'get-read-receipts',
+    description: '발송한 메일의 읽음 여부를 확인합니다.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: '조회할 메일 수 (기본값: 20)' },
+      },
+    },
+  },
 ];
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -101,6 +222,10 @@ const GetMailSchema = z.object({
   folder: z.string().optional(),
 });
 
+const GetReadReceiptsSchema = z.object({
+  limit: z.number().optional(),
+});
+
 function createTransporter() {
   return nodemailer.createTransport({
     host: SMTP_HOST,
@@ -123,6 +248,15 @@ function createImapClient() {
 const handlers = {
   'send-mail': async (args) => {
     const { to, cc, bcc, subject, body, isHtml } = SendMailSchema.parse(args);
+
+    const trackingId = randomUUID();
+    const pixelUrl = `${TRACKING_BASE_URL}/pixel/${trackingId}.gif`;
+    const pixelTag = `<img src="${pixelUrl}" width="1" height="1" alt="" style="display:none">`;
+
+    const htmlBody = isHtml
+      ? `${body}${pixelTag}`
+      : `<pre style="font-family:sans-serif;white-space:pre-wrap">${body}</pre>${pixelTag}`;
+
     const transporter = createTransporter();
     const info = await transporter.sendMail({
       from: MAIL_USER,
@@ -130,9 +264,50 @@ const handlers = {
       cc,
       bcc,
       subject,
-      [isHtml ? 'html' : 'text']: body,
+      text: isHtml ? undefined : body,
+      html: htmlBody,
+      headers: { 'Disposition-Notification-To': MAIL_USER },
     });
-    return ok({ messageId: info.messageId, response: info.response, accepted: info.accepted });
+
+    const db = loadTracking();
+    db[trackingId] = { messageId: info.messageId, subject, to, sentAt: new Date().toISOString(), readAt: null };
+    saveTracking(db);
+
+    // Save to Sent folder via IMAP
+    try {
+      const client = createImapClient();
+      await client.connect();
+      try {
+        const folders = await client.list();
+        let sentFolder = 'Sent';
+        for (const f of folders) {
+          if (f.specialUse === '\\Sent' || (f.flags && f.flags.has('\\Sent'))) {
+            sentFolder = f.path;
+            break;
+          }
+        }
+
+        const rawLines = [`From: ${MAIL_USER}`, `To: ${to}`];
+        if (cc) rawLines.push(`Cc: ${cc}`);
+        rawLines.push(
+          `Subject: ${subject}`,
+          `Date: ${new Date().toUTCString()}`,
+          `Message-ID: ${info.messageId}`,
+          `MIME-Version: 1.0`,
+          `Disposition-Notification-To: ${MAIL_USER}`,
+          `Content-Type: text/html; charset=UTF-8`,
+          ``,
+          htmlBody,
+        );
+        await client.append(sentFolder, Buffer.from(rawLines.join('\r\n')), ['\\Seen']);
+      } finally {
+        await client.logout();
+      }
+    } catch (appendErr) {
+      process.stderr.write(`Failed to save to Sent folder: ${appendErr.message}\n`);
+    }
+
+    return ok({ messageId: info.messageId, response: info.response, accepted: info.accepted, trackingId });
   },
 
   'get-mail-list': async (args) => {
@@ -174,7 +349,6 @@ const handlers = {
       }, { uid: true });
       if (!msg) throw new Error(`메일 UID ${uid}를 찾을 수 없습니다.`);
 
-      // 텍스트/HTML 본문 추출
       const source = msg.source.toString();
       const bodyMatch = source.match(/\r?\n\r?\n([\s\S]*)/);
       const bodyText = bodyMatch ? bodyMatch[1].substring(0, 5000) : '';
@@ -197,14 +371,23 @@ const handlers = {
     const client = createImapClient();
     await client.connect();
     try {
-      const folders = [];
-      for await (const folder of client.list()) {
-        folders.push({ name: folder.name, path: folder.path, delimiter: folder.delimiter });
-      }
+      const list = await client.list();
+      const folders = list.map(f => ({ name: f.name, path: f.path, delimiter: f.delimiter, specialUse: f.specialUse }));
       return ok({ folders });
     } finally {
       await client.logout();
     }
+  },
+
+  'get-read-receipts': async (args) => {
+    const { limit = 20 } = GetReadReceiptsSchema.parse(args);
+    const db = loadTracking();
+    const receipts = Object.entries(db)
+      .map(([trackingId, v]) => ({ trackingId, ...v }))
+      .sort((a, b) => new Date(b.sentAt) - new Date(a.sentAt))
+      .slice(0, limit)
+      .map(r => ({ ...r, read: !!r.readAt }));
+    return ok({ receipts });
   },
 };
 

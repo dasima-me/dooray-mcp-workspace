@@ -60,5 +60,31 @@ server.tool(
   }
 );
 
+server.tool(
+  "search-members",
+  "두레이 조직 멤버를 이름으로 검색합니다. 캘린더/메신저에서 참석자 추가 시 organizationMemberId를 찾는 데 사용하세요.",
+  {
+    name: z.string().describe("검색할 멤버 이름 (예: 남유정)"),
+    size: z.number().optional().describe("결과 수 (기본값: 10, 최대 100)")
+  },
+  async ({ name, size = 10 }) => {
+    const params = new URLSearchParams({ name, size: String(size) });
+    const res = await fetch(`${BASE_URL}/common/v1/members?${params}`, { headers });
+    const data = await res.json();
+    const members = data?.result ?? data?.data ?? data;
+    if (Array.isArray(members)) {
+      const summary = members.map(m => ({
+        organizationMemberId: m.organizationMemberId ?? m.id,
+        name: m.name,
+        email: m.emailAddress,
+        department: m.department,
+        position: m.position
+      }));
+      return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+    }
+    return { content: [{ type: "text", text: `HTTP ${res.status}\n${JSON.stringify(data, null, 2)}` }] };
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
